@@ -126,7 +126,6 @@ check_system_health() {
         set_led_state "wifi_red" 0
     fi
 
-    # Check for recent system errors (last 30 seconds)
     if dmesg | tail -20 | grep -q "error\|fail\|crash\|oops"; then
         set_led_state "wifi_red" 1
     fi
