@@ -1,0 +1,157 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+USE_PROCD=1
+
+LED_PATH="/sys/class/leds"
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /bin/sh "$0" run
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+run() {
+    while true; do
+        check_modem_status
+        check_wifi_status
+        check_system_health
+        sleep 10
+    done
+}
+
+check_modem_status() { 
+    if [ ! -e "/dev/ttyUSB2" ] && [ ! -e "/dev/cdc-wdm0" ] && [ ! -e "/dev/mhi_QMI0" ]; then
+        set_signal_leds 0 0 0 0
+        set_led_state "signal_yellow" 0
+        return
+    fi
+
+    local qmi_device=""
+    for dev in /dev/mhi_QMI0 /dev/cdc-wdm0 /dev/ttyUSB2; do
+        if [ -e "$dev" ]; then
+            qmi_device="$dev"
+            break
+        fi
+    done
+
+    if [ -z "$qmi_device" ]; then
+        set_signal_leds 0 0 0 0
+        set_led_state "signal_yellow" 0
+        return
+    fi
+
+    signal_info=$(uqmi -d "$qmi_device" --get-signal-info 2>/dev/null)
+    system_info=$(uqmi -d "$qmi_device" --get-serving-system 2>/dev/null)
+
+    signal_db=$(echo "$signal_info" | grep -o '"rssi":[^,]*' | cut -d: -f2 | tr -d '" ' | head -1)
+    network_type=$(echo "$system_info" | grep -o '"rat":[^,}]*' | cut -d: -f2 | tr -d '" ' | head -1)
+
+    if [ -n "$signal_db" ] && [ "$signal_db" != "-" ] && [ "$signal_db" != "null" ]; then
+        if [ "$network_type" = "5G" ] || [ "$network_type" = "NR5G" ]; then
+            set_led_state "signal_yellow" 0
+            set_signal_strength "$signal_db"
+        else
+            set_led_state "signal_yellow" 1
+            set_signal_strength "$signal_db"
+        fi
+    else
+        set_signal_leds 0 0 0 0
+        set_led_state "signal_yellow" 0
+    fi
+}
+
+set_signal_strength() {
+    signal_db=$1
+
+    if ! echo "$signal_db" | grep -qE '^-?[0-9]+$'; then
+        set_signal_leds 0 0 0 0
+        return
+    fi
+
+    if [ "$signal_db" -ge -70 ]; then
+        set_signal_leds 1 1 1 1
+    elif [ "$signal_db" -ge -80 ]; then
+        set_signal_leds 1 1 1 0
+    elif [ "$signal_db" -ge -90 ]; then
+        set_signal_leds 1 1 0 0
+    elif [ "$signal_db" -ge -100 ]; then
+        set_signal_leds 1 0 0 0
+    else
+        set_signal_leds 0 0 0 0
+    fi
+}
+
+check_wifi_status() {
+    local wifi_disabled=0
+    for radio in /sys/class/ieee80211/*; do
+        if [ -f "$radio/device/disabled" ] && [ "$(cat "$radio/device/disabled")" = "1" ]; then
+            wifi_disabled=1
+            break
+        fi
+    done
+
+    if [ "$wifi_disabled" = "1" ]; then
+        set_led_state "wifi_green" 0
+        set_led_state "wifi_orange" 1
+        set_led_state "wifi_red" 0
+    else
+        set_led_state "wifi_green" 1
+        set_led_state "wifi_orange" 0
+        set_led_state "wifi_red" 0
+    fi
+
+    if pgrep wps-hotplug >/dev/null || iw dev | grep -q "WPS"; then
+        set_led_state "wifi_orange" 1
+        echo "timer" > "$LED_PATH/wifi_orange/trigger" 2>/dev/null
+        echo 500 > "$LED_PATH/wifi_orange/delay_on" 2>/dev/null
+        echo 500 > "$LED_PATH/wifi_orange/delay_off" 2>/dev/null
+    fi
+}
+
+check_system_health() {
+    temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+    temp=${temp:-0}
+
+    if [ "$temp" -gt 80000 ]; then
+        set_led_state "power_green" 0
+        set_led_state "power_red" 1
+        set_led_state "wifi_red" 1
+    else
+        set_led_state "power_green" 1
+        set_led_state "power_red" 0
+        set_led_state "wifi_red" 0
+    fi
+
+    # Check for recent system errors (last 30 seconds)
+    if dmesg | tail -20 | grep -q "error\|fail\|crash\|oops"; then
+        set_led_state "wifi_red" 1
+    fi
+}
+
+set_signal_leds() {
+    echo "$1" > "$LED_PATH/signal_1/brightness" 2>/dev/null
+    echo "$2" > "$LED_PATH/signal_2/brightness" 2>/dev/null
+    echo "$3" > "$LED_PATH/signal_3/brightness" 2>/dev/null
+    echo "$4" > "$LED_PATH/signal_4/brightness" 2>/dev/null
+}
+
+set_led_state() {
+    led=$1
+    state=$2
+    echo "$state" > "$LED_PATH/$led/brightness" 2>/dev/null
+    echo "none" > "$LED_PATH/$led/trigger" 2>/dev/null
+}
+
+stop_service() {
+    set_led_state "power_green" 1
+    set_led_state "power_red" 0
+    set_led_state "wifi_green" 1
+    set_led_state "wifi_orange" 0
+    set_led_state "wifi_red" 0
+    set_signal_leds 0 0 0 0
+    set_led_state "signal_yellow" 0
+}
